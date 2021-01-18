@@ -119,7 +119,8 @@ for epoch in range(2000):
                     plt.axvline(pred_exp[0, i], color=palette[idx])
                     plt.axvline(actual_exp[0, i], color=palette[idx], linestyle=':')
             elif idx == 4:
-                plt.savefig(os.path.join(log_dir, 'plot', 'hist-%d.png' % (epoch // 10)))
+                os.makedirs(os.path.join(args.log_dir, 'plot'), exist_ok=True)
+                plt.savefig(os.path.join(args.log_dir, 'plot', 'hist-%d.png' % (epoch // 10)))
                 plt.close()
             
         errors = torch.cat(errors)
@@ -130,4 +131,4 @@ for epoch in range(2000):
     message(epoch)
 
     if (epoch+1) % 10 == 0:
-        torch.save(predictor.state_dict(), 'pretrained/predictor_%d-%d-%s.pt' % (args.feat_size, args.n_future, args.predictor_model))
+        torch.save(predictor.state_dict(), 'pretrained/predictor2_%d-%d-%s.pt' % (args.feat_size, args.n_future, args.predictor_model))
