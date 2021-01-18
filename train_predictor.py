@@ -6,7 +6,9 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 import random
 from dataset import *
-from models import *
+from model import *
+import seaborn as sns
+
 import gc
 import os
 import argparse
@@ -71,6 +73,7 @@ scheduler = optim.lr_scheduler.StepLR(exp_optim, 20, 0.9)
 
 # Learn the conditional expectation
 for epoch in range(2000):
+    
     multi_dataset.set_nsample(4)
     for idx, data in enumerate(multi_loader):
         exp_optim.zero_grad()
@@ -88,12 +91,13 @@ for epoch in range(2000):
         writer.add_scalar('loss_l2', loss_l2, global_iteration)
         exp_optim.step()
         global_iteration += 1
-        
+            
     errors = []
-    rel_error = []
     baseline_error = []
     num_elem = 0
     multi_dataset.set_nsample(args.n_sample)
+    plt.figure(figsize=(20, 20))
+    palette = sns.color_palette('hls', 4)
     with torch.no_grad():
         for idx, data in enumerate(multi_loader):
             bx, by, bl = data
@@ -102,23 +106,28 @@ for epoch in range(2000):
             actual_feat = feat_model(bx[:, :, -1].view(-1, 1, 64, 64)).view(args.batch_size, args.n_sample, args.feat_size)
             actual_exp = actual_feat.mean(dim=1)
             pred_exp = predictor(bx[:, 0, 0:2])
-            
-            var = (actual_exp - actual_exp.mean(keepdim=True)).abs()
             errors.append(actual_exp - pred_exp)
-            rel_error.append((actual_exp - pred_exp) / (1e-5 + var))
             
             baseline_error.append(actual_feat[:, :args.n_sample//2, :].mean(dim=1) - actual_feat[:, args.n_sample//2:, :].mean(dim=1))
             num_elem += args.batch_size
             if num_elem > 1000:
                 break
+            if idx < 4:
+                for i in range(36):
+                    plt.subplot(6, 6, i+1)
+                    plt.hist(actual_feat[0, :, i].cpu().numpy(), bins=20, color=palette[idx], alpha=0.5)
+                    plt.axvline(pred_exp[0, i], color=palette[idx])
+                    plt.axvline(actual_exp[0, i], color=palette[idx], linestyle=':')
+            elif idx == 4:
+                plt.savefig(os.path.join(log_dir, 'plot', 'hist-%d.png' % (epoch // 10)))
+                plt.close()
+            
         errors = torch.cat(errors)
-        rel_error = torch.cat(rel_error)
         baseline_error = torch.cat(baseline_error)
     writer.add_scalar('loss_exp_l1', errors.abs().mean(), global_iteration)
-    writer.add_scalar('loss_exp_l1_rel', rel_error.abs().mean(), global_iteration)
     writer.add_scalar('loss_exp_l1_base', baseline_error.abs().mean(), global_iteration)
     scheduler.step()
     message(epoch)
 
-    if epoch % 10 == 0:
+    if (epoch+1) % 10 == 0:
         torch.save(predictor.state_dict(), 'pretrained/predictor_%d-%d-%s.pt' % (args.feat_size, args.n_future, args.predictor_model))
