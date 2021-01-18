@@ -33,9 +33,10 @@ device = torch.device('cuda:%d' % args.gpu)
 args.device = device
 
 while True:
-    args.log_dir = '/data/hdim-forecast/log3/pred/model=%s-seq=%d/%d-ns=%d-feat_size=%d-bs=%d-lr=%.5f-run=%d' % \
+    args.name = 'model=%s-seq=%d/%d-ns=%d-feat_size=%d-bs=%d-lr=%.5f-run=%d' % \
         (args.predictor_model, args.n_past, args.n_future, args.n_sample, args.feat_size, 
          args.batch_size, args.learning_rate, args.run_label)
+    args.log_dir = os.path.join(args.log_root, 'pred', args.name)
     if not os.path.isdir(args.log_dir):
         os.makedirs(args.log_dir)
         break
