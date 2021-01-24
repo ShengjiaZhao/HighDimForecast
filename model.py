@@ -60,6 +60,8 @@ class FeatureNet2(nn.Module):
         else:
             return self.fc3(x)
 
+
+    
 class FeatureNetC(nn.Module):
     def __init__(self, feat_size, train_mode=False):
         super(FeatureNetC, self).__init__()
@@ -87,6 +89,24 @@ class FeatureNetC(nn.Module):
             return x, self.fc3(x)
         else:
             return x
+
+class FeatureNetFirstMoment(nn.Module):
+    def __init__(self, feat_dim=0):
+        super(FeatureNetFirstMoment, self).__init__()
+    
+    def forward(self, x):
+        first_order = x 
+        return first_order
+    
+class FeatureNetSecondMoment(nn.Module):
+    def __init__(self, feat_dim=0):
+        super(FeatureNetMoment, self).__init__()
+    
+    def forward(self, x):
+        first_order = x 
+        second_order = x.unsqueeze(-1).repeat(1, 1, x.shape[1]) * x.unsqueeze(-2).repeat(1, x.shape[1], 1)
+        return torch.cat([first_order, second_order.view(-1, x.shape[1] * x.shape[1])], dim=1)
+        
         
     
 class PredictorBig(nn.Module):
@@ -153,9 +173,72 @@ class PredictorMedium(nn.Module):
         x = F.leaky_relu(self.fc2(x))
         return self.fc3(x)
     
-predictors = {'big': PredictorBig, 'medium': PredictorMedium}
 
 
+'''Defines the neural network, loss function and metrics'''
+
+class PredictorRecurrent(nn.Module):
+    def __init__(self, params):
+        '''
+        We define a recurrent network that predicts the future values of a time-dependent variable based on
+        past inputs and covariates.
+        '''
+        super(PredictorRecurrent, self).__init__()
+        self.params = params
+        self.lstm = nn.LSTM(input_size=params.x_dim+params.y_dim,
+                            hidden_size=params.lstm_hidden_dim,
+                            num_layers=params.lstm_layers,
+                            dropout=params.lstm_dropout,
+                            bias=True,
+                            batch_first=False)
+        
+        # initialize LSTM forget gate bias to be 1 as recommanded by http://proceedings.mlr.press/v37/jozefowicz15.pdf
+        for names in self.lstm._all_weights:
+            for name in filter(lambda n: "bias" in n, names):
+                bias = getattr(self.lstm, name)
+                n = bias.size(0)
+                start, end = n // 4, n // 2
+                bias.data[start:end].fill_(1.)
+
+        self.fc1 = nn.Linear(params.lstm_hidden_dim * params.lstm_layers, 1024)
+        self.drop1 = nn.Dropout(p=params.lstm_dropout)
+        self.fc2 = nn.Linear(1024, params.feat_size)
+        
+
+    def forward(self, x, y_prev):
+        '''
+        Predict mu and sigma of the distribution for z_t.
+        Args:
+            x: ([batch_size, n_past, x_dim]), the input feature
+            y: ([batch_size, n_past, y_dim]), the previous step label
+        Returns:
+            pred 
+            mu ([batch_size, y_dim]): estimated mean of z_t
+            sigma ([batch_size, y_dim]): estimated standard deviation of z_t
+            hidden ([lstm_layers, batch_size, lstm_hidden_dim]): LSTM h from time step t
+            cell ([lstm_layers, batch_size, lstm_hidden_dim]): LSTM c from time step t
+        '''
+        hidden, cell = self.init_hidden(x.shape[0]), self.init_cell(x.shape[0])
+        
+        lstm_input = torch.cat([x, y_prev], dim=-1)
+        # print(lstm_input.shape)
+        output, (hidden, cell) = self.lstm(lstm_input.permute(1, 0, 2), (hidden, cell))
+        
+        # print(output.shape, hidden.shape, cell.shape)
+            
+        # use h from all three layers to calculate mu and sigma
+        hidden_permute = hidden.permute(1, 0, 2).contiguous().view(hidden.shape[1], -1) 
+        # print(hidden_permute.shape)
+        fc = self.drop1(F.leaky_relu(self.fc1(hidden_permute)))
+        return self.fc2(fc)
+
+    def init_hidden(self, input_size):
+        return torch.zeros(self.params.lstm_layers, input_size, self.params.lstm_hidden_dim, device=self.params.device)
+
+    def init_cell(self, input_size):
+        return torch.zeros(self.params.lstm_layers, input_size, self.params.lstm_hidden_dim, device=self.params.device)
+
+    
 
 class Sampler:
     def __init__(self, device, batch_size=100):
@@ -218,3 +301,90 @@ class Sampler:
         all_gen = [torch.stack(item) for item in all_gen]
         all_gen = torch.stack(all_gen)
         return all_gen
+
+    
+predictors = {'big': PredictorBig, 'medium': PredictorMedium, 'lstm': PredictorRecurrent}
+
+class LSTMSampler(nn.Module):
+    def __init__(self, params):
+        '''
+        We define a recurrent network that predicts the future values of a time-dependent variable based on
+        past inputs and covariates.
+        '''
+        super(LSTMSampler, self).__init__()
+        self.params = params
+        self.lstm = nn.LSTM(input_size=params.x_dim+params.y_dim,
+                            hidden_size=params.lstm_hidden_dim,
+                            num_layers=params.lstm_layers,
+                            bias=True,
+                            batch_first=False)
+        
+        # initialize LSTM forget gate bias to be 1 as recommanded by http://proceedings.mlr.press/v37/jozefowicz15.pdf
+        for names in self.lstm._all_weights:
+            for name in filter(lambda n: "bias" in n, names):
+                bias = getattr(self.lstm, name)
+                n = bias.size(0)
+                start, end = n // 4, n // 2
+                bias.data[start:end].fill_(1.)
+
+        self.relu = nn.ReLU()
+        self.distribution_mu = nn.Linear(params.lstm_hidden_dim * params.lstm_layers, params.y_dim)
+        self.distribution_presigma = nn.Linear(params.lstm_hidden_dim * params.lstm_layers, params.y_dim)
+        self.distribution_sigma = nn.Softplus()
+        
+
+    def forward(self, x, y_prev, hidden, cell):
+        '''
+        Predict mu and sigma of the distribution for z_t.
+        Args:
+            x: ([1, batch_size, x_dim]), the input feature
+            y: ([1, batch_size, y_dim]), the previous step label
+            hidden ([lstm_layers, batch_size, lstm_hidden_dim]): LSTM h from time step t-1
+            cell ([lstm_layers, batch_size, lstm_hidden_dim]): LSTM c from time step t-1
+        Returns:
+            mu ([batch_size, y_dim]): estimated mean of z_t
+            sigma ([batch_size, y_dim]): estimated standard deviation of z_t
+            hidden ([lstm_layers, batch_size, lstm_hidden_dim]): LSTM h from time step t
+            cell ([lstm_layers, batch_size, lstm_hidden_dim]): LSTM c from time step t
+        '''
+        lstm_input = torch.cat((x, y_prev), dim=2)
+        output, (hidden, cell) = self.lstm(lstm_input, (hidden, cell))
+        # use h from all three layers to calculate mu and sigma
+        hidden_permute = hidden.permute(1, 2, 0).contiguous().view(hidden.shape[1], -1) 
+        pre_sigma = self.distribution_presigma(hidden_permute)
+        mu = self.distribution_mu(hidden_permute)
+        sigma = self.distribution_sigma(pre_sigma)  # softplus to make sure standard deviation is positive
+        return mu, sigma, hidden, cell
+
+    def init_hidden(self, input_size):
+        return torch.zeros(self.params.lstm_layers, input_size, self.params.lstm_hidden_dim, device=self.params.device)
+
+    def init_cell(self, input_size):
+        return torch.zeros(self.params.lstm_layers, input_size, self.params.lstm_hidden_dim, device=self.params.device)
+
+    def sample(self, x, y_prev, num_steps):
+        '''
+        Predict mu and sigma of the distribution for z_t.
+        Args:
+            x: ([seq_len+num_steps, batch_size, x_dim]), the input feature
+            y: ([seq_len, batch_size, y_dim]), the previous step label
+        Returns:
+            samples ([num_steps, batch_size, y_dim]) the generated samples
+        '''
+        # print(x.shape, y_prev.shape)
+        samples = torch.zeros(num_steps, x.shape[1], self.params.y_dim, device=self.params.device)
+        
+        hidden, cell = self.init_hidden(x.shape[1]), self.init_cell(x.shape[1])
+        # print(hidden.shape)
+        for t in range(self.params.n_past):
+            mu, sigma, hidden, cell = self(x[t:t+1, :], y_prev[t:t+1, :], hidden, cell)
+        # print(mu.shape)
+        for j in range(num_steps):
+            
+            gaussian = torch.distributions.normal.Normal(mu, sigma)
+            samples[j, :, :] = gaussian.sample()  # not scaled
+            mu, sigma, hidden, celll = self(x[self.params.n_past+j].unsqueeze(0), 
+                                 samples[j].unsqueeze(0), 
+                                 hidden, cell)
+                        
+        return samples
