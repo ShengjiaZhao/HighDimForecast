@@ -1,0 +1,1 @@
+python3.6 train_svg_lp.py --dataset smmnist --num_digits 2 --g_dim 128 --z_dim 10 --beta 0.0001 --n_past=2 --data_root data --log_dir /data/svg
